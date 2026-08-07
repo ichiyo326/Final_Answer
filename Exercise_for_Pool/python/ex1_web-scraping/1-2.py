@@ -2,29 +2,17 @@
 課題1-2: Selenium によるぐるなびクローリング・スクレイピング
 
 出力: 1-2.csv （店舗名, 電話番号, メールアドレス, 都道府県, 市区町村, 番地, 建物名, URL, SSL）
-使用: 課題要件の通り、ページ下部の「>」（次へ）ボタンをクリックしてページ遷移する。
-
-■ 実行前の準備
-  1. お使いのChromeのバージョンに合ったchromedriverをダウンロードし、
-     このスクリプトと同じディレクトリに配置する。
-  2. pip install selenium pandas
-
-■ 実行前に必ず確認してください
-  このコードは AI アシスタントがネットワークに接続できない環境で作成したため、
-  ぐるなびの実際のHTML構造（クラス名等）を見て動作確認できていません。
-  下記 CONFIG / セレクタ定義部分は、キーワードによるラベル検索や
-  URLパターンなど、なるべく構造変化に強い書き方にしてありますが、
-  実行してうまく要素が見つからない場合は、ブラウザの開発者ツール(F12)で
-  実際の要素を確認し、NEXT_BUTTON_XPATH 等を調整してください。
+ページ下部の「>」（次へ）ボタンをクリックしてページ遷移する。
 """
 
 from __future__ import annotations
 
-import re
 import json
-import time
+import os
+import re
 import socket
 import ssl
+import time
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -38,14 +26,14 @@ from selenium.common.exceptions import (
 )
 
 # ============================== CONFIG ==============================
-CHROMEDRIVER_PATH = "./chromedriver"  # 提出物として同ディレクトリに同梱すること
+CHROMEDRIVER_PATH = "./chromedriver"  # 提出物として同ディレクトリに同梱
 
-SEARCH_URL = "https://r.gnavi.co.jp/area/tokyo/rs/"  # 検索条件は問わない。適宜変更する
+SEARCH_URL = "https://r.gnavi.co.jp/area/tokyo/rs/"
 
 TARGET_RECORD_COUNT = 50
-MAX_PAGE_TRANSITIONS = 20  # 安全装置
+MAX_PAGE_TRANSITIONS = 20
 
-REQUEST_INTERVAL_SEC = 3  # 課題要件: 各リクエスト（ページ遷移）前に3秒アイドリング
+REQUEST_INTERVAL_SEC = 3  # 課題要件: 各ページ遷移前に3秒アイドリング
 WAIT_TIMEOUT_SEC = 10
 
 USER_AGENT = (
@@ -53,32 +41,26 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-# 店舗詳細ページURLの形式（例: https://r.gnavi.co.jp/g725448/ ）。
-# 実際のURL形式に合わせて修正すること。
+# 店舗詳細ページのURL（例: https://r.gnavi.co.jp/g747765/）。
 DETAIL_URL_PATTERN = re.compile(r"https?://r\.gnavi\.co\.jp/([a-zA-Z0-9]{5,14})/?$")
 
-# 「次へ」（>）ボタンを探すXPath。テキストや aria-label 等、複数の候補を用意している。
-NEXT_BUTTON_XPATH = (
-    "//a[contains(@href,'p=')][.//img[contains(@class,'nextIcon')]]"
-)
+# 「次へ」ボタン: アイコン画像（class に nextIcon を含む）を持ち、
+# href にページ番号パラメータ(p=)を含むリンク。
+NEXT_BUTTON_XPATH = "//a[contains(@href,'p=')][.//img[contains(@class,'nextIcon')]]"
 
 OUTPUT_CSV = "1-2.csv"
 # ======================================================================
 
 
 def build_driver() -> webdriver.Chrome:
-    import os
     options = webdriver.ChromeOptions()
     options.add_argument(f"user-agent={USER_AGENT}")
-    # ヘッドレスで動かしたい場合は以下2行のコメントを外す
-    # options.add_argument("--headless=new")
-    # options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     if os.path.exists(CHROMEDRIVER_PATH):
         service = Service(executable_path=CHROMEDRIVER_PATH)
         return webdriver.Chrome(service=service, options=options)
-    # ローカルにchromedriverが無い場合、Selenium Managerに自動解決させる
+    # 同梱のchromedriverが無い場合はSelenium Managerに解決させる
     return webdriver.Chrome(options=options)
 
 
@@ -95,7 +77,9 @@ def extract_detail_urls_from_current_page(driver) -> list[str]:
             href = a.get_attribute("href")
         except WebDriverException:
             href = None
-        m = DETAIL_URL_PATTERN.match(href) if href else None
+        if not href:
+            continue
+        m = DETAIL_URL_PATTERN.match(href)
         if m and re.search(r"\d", m.group(1)):
             urls.append(href.rstrip("/") + "/")
     seen = set()
@@ -123,18 +107,17 @@ def collect_detail_urls(driver) -> list[str]:
                 seen.add(u)
                 detail_urls.append(u)
                 new_count += 1
-        print(f"[LIST page {page}] +{new_count}件 (累計 {len(detail_urls)}件) URL={driver.current_url}")
+        print(f"[LIST page {page}] +{new_count}件 (累計 {len(detail_urls)}件)")
 
         if len(detail_urls) >= TARGET_RECORD_COUNT:
             break
 
-        # 課題要件: 「>」ボタンをクリックしてページ遷移する
         try:
             next_button = WebDriverWait(driver, WAIT_TIMEOUT_SEC).until(
                 EC.element_to_be_clickable((By.XPATH, NEXT_BUTTON_XPATH))
             )
         except TimeoutException:
-            print("  次へボタンが見つかりません。ページ遷移を終了します。")
+            print("  次へボタンが見つかりません。")
             break
 
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", next_button)
@@ -150,17 +133,12 @@ def collect_detail_urls(driver) -> list[str]:
 
 
 def find_value_by_label(driver, keywords: list[str]):
-    """th/dt ラベルのテキストにキーワードを含む要素の次(td/dd)を返す。"""
     for label_tag, value_tag in (("th", "td"), ("dt", "dd")):
-        elements = driver.find_elements(By.TAG_NAME, label_tag)
-        for label in elements:
+        for label in driver.find_elements(By.TAG_NAME, label_tag):
             label_text = label.text.strip()
             if any(kw in label_text for kw in keywords):
                 try:
-                    value = label.find_element(
-                        By.XPATH, f"following-sibling::{value_tag}[1]"
-                    )
-                    return value
+                    return label.find_element(By.XPATH, f"following-sibling::{value_tag}[1]")
                 except NoSuchElementException:
                     continue
     return None
@@ -212,6 +190,40 @@ def split_address(address: str):
     return pref, city, banchi, building
 
 
+def extract_address(driver):
+    """
+    「住所」欄の adr マイクロフォーマットから region（番地まで）と
+    locality（建物名）を別々に取得し、region 側だけ正規表現で分割する。
+    """
+    address_el = find_value_by_label(driver, ["住所"])
+    raw_address = ""
+    building_from_dom = ""
+    if address_el:
+        try:
+            adr_sub = address_el.find_element(By.CSS_SELECTOR, ".adr")
+            try:
+                region_el = adr_sub.find_element(By.CSS_SELECTOR, ".region")
+                raw_address = region_el.text
+                try:
+                    locality_el = adr_sub.find_element(By.CSS_SELECTOR, ".locality")
+                    building_from_dom = locality_el.text
+                except NoSuchElementException:
+                    building_from_dom = ""
+            except NoSuchElementException:
+                raw_address = adr_sub.text
+        except NoSuchElementException:
+            raw_address = address_el.text
+
+    raw_address = re.sub(r"\s+", "", raw_address)
+    raw_address = re.sub(r"^〒?\d{3}-?\d{4}", "", raw_address)
+    raw_address = re.sub(r"(大きな地図で見る|地図印刷).*$", "", raw_address)
+    building_from_dom = re.sub(r"\s+", "", building_from_dom)
+
+    pref, city, banchi, building_guess = split_address(raw_address)
+    building = building_from_dom if building_from_dom else building_guess
+    return pref, city, banchi, building
+
+
 def check_ssl(url: str) -> bool:
     parsed = urlparse(url)
     if parsed.scheme != "https":
@@ -230,12 +242,36 @@ def check_ssl(url: str) -> bool:
         return False
 
 
+def extract_official_url(driver) -> str:
+    """
+    「オフィシャルページ」等のリンクを取得する。href が "#" のことがあるため、
+    data-o 属性のJSONに実URLが入っていればそちらを優先する。
+    """
+    for a in driver.find_elements(By.TAG_NAME, "a"):
+        link_text = a.text.strip()
+        if not ("オフィシャルページ" in link_text or "お店のホームページ" in link_text or "ホームページ" in link_text):
+            continue
+
+        data_o = a.get_attribute("data-o")
+        if data_o:
+            try:
+                info = json.loads(data_o)
+                domain_path = info.get("a", "")
+                scheme = info.get("b") or "http"
+                if domain_path:
+                    return f"{scheme}://{domain_path}"
+            except (ValueError, TypeError):
+                pass
+
+        href = a.get_attribute("href")
+        if href and not href.rstrip().endswith("#"):
+            return href
+
+    return ""
+
+
 def resolve_official_url(driver, href: str) -> str:
-    """
-    「オフィシャルページ」等のリンクを実際に新しいタブで開き、
-    リダイレクト後にアドレスバーに表示される最終URLを取得する
-    （課題要件5）。
-    """
+    """新しいタブでリンクを開き、遷移後のURL（課題要件5）を取得する。"""
     original_window = driver.current_window_handle
     driver.switch_to.new_window("tab")
     final_url = href
@@ -276,52 +312,9 @@ def parse_detail_page(driver, url: str) -> dict | None:
     mail_el = find_value_by_label(driver, ["メールアドレス", "メール"])
     email = extract_email(mail_el.text) if mail_el else extract_email(page_text)
 
-    address_el = find_value_by_label(driver, ["住所"])
-    raw_address = ""
-    building_from_dom = ""
-    if address_el:
-        try:
-            adr_sub = address_el.find_element(By.CSS_SELECTOR, ".adr")
-            try:
-                region_el = adr_sub.find_element(By.CSS_SELECTOR, ".region")
-                raw_address = region_el.text
-                try:
-                    locality_el = adr_sub.find_element(By.CSS_SELECTOR, ".locality")
-                    building_from_dom = locality_el.text
-                except NoSuchElementException:
-                    building_from_dom = ""
-            except NoSuchElementException:
-                raw_address = adr_sub.text
-        except NoSuchElementException:
-            raw_address = address_el.text
-    raw_address = re.sub(r"\s+", "", raw_address)
-    raw_address = re.sub(r"^〒?\d{3}-?\d{4}", "", raw_address)
-    raw_address = re.sub(r"(大きな地図で見る|地図印刷).*$", "", raw_address)
-    building_from_dom = re.sub(r"\s+", "", building_from_dom)
-    pref, city, banchi, building_guess = split_address(raw_address)
-    building = building_from_dom if building_from_dom else building_guess
+    pref, city, banchi, building = extract_address(driver)
 
-    official_href = ""
-    for a in driver.find_elements(By.TAG_NAME, "a"):
-        link_text = a.text.strip()
-        if "オフィシャルページ" in link_text or "お店のホームページ" in link_text or "ホームページ" in link_text:
-            data_o = a.get_attribute("data-o")
-            if data_o:
-                try:
-                    info = json.loads(data_o)
-                    domain_path = info.get("a", "")
-                    scheme = info.get("b") or "http"
-                    if domain_path:
-                        official_href = f"{scheme}://{domain_path}"
-                except (ValueError, TypeError):
-                    official_href = ""
-            if not official_href:
-                href = a.get_attribute("href")
-                if href and not href.rstrip().endswith("#"):
-                    official_href = href
-            if official_href:
-                break
-
+    official_href = extract_official_url(driver)
     final_url = ""
     ssl_flag = False
     if official_href:

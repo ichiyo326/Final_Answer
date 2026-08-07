@@ -1,37 +1,28 @@
 """
-課題2-2: ぐるなびスクレイピング結果をMySQL (database: ex2, table: ex2_2) へ格納する
+課題2-2: ぐるなびスクレイピング結果を MySQL (database: ex2, table: ex2_2) へ格納する
 
-requests + BeautifulSoup でスクレイピングし（課題1-1と同じロジック）、
-sqlalchemy + pandas で MySQL に書き込む。
+requests + BeautifulSoup でスクレイピングし、sqlalchemy + pandas で MySQL に書き込む。
 Dockerコンテナ内のPython3.8環境で実行することを想定。
 
-■ 実行前の準備
-  1. pip install sqlalchemy pandas requests beautifulsoup4 pymysql
-  2. MySQLに database `ex2` を作成しておく:
-       mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS ex2 CHARACTER SET utf8mb4;"
-  3. 下記 CONFIG の DB接続情報を環境に合わせて修正する
-     （パスワード等は環境変数から読む形にしてあるので、実行前に
-      export MYSQL_PASSWORD=xxxx のように設定すること）
-
-■ 注意
-  ネットワーク非接続環境で作成したため、ぐるなびの実HTML構造は
-  未検証。1-1.py と同様にセレクタ調整が必要な場合がある。
+事前準備:
+  - MySQLに database `ex2` を作成しておく
+  - 接続情報は環境変数 (MYSQL_HOST / MYSQL_USER / MYSQL_PASSWORD) から読む
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
-import json
-import time
 import socket
 import ssl
+import time
 from urllib.parse import urljoin, urlparse
 
+import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-import pandas as pd
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 # ============================== CONFIG ==============================
 SEARCH_URLS = [
@@ -53,11 +44,10 @@ HEADERS = {
 
 DETAIL_URL_PATTERN = re.compile(r"https?://r\.gnavi\.co\.jp/([a-zA-Z0-9]{5,14})/?$")
 
-# --- MySQL接続情報 ---
 MYSQL_HOST = os.environ.get("MYSQL_HOST", "localhost")
 MYSQL_PORT = os.environ.get("MYSQL_PORT", "3306")
 MYSQL_USER = os.environ.get("MYSQL_USER", "root")
-MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD", "")  # 環境変数で渡すこと
+MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD", "")
 MYSQL_DB = "ex2"
 MYSQL_TABLE = "ex2_2"
 # ======================================================================
@@ -122,17 +112,19 @@ def find_value_by_label(soup: BeautifulSoup, keywords):
     return None
 
 
-def extract_email(text: str) -> str:
-    m = re.search(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", text)
+def extract_email(text_: str) -> str:
+    m = re.search(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", text_)
     return m.group(0) if m else ""
 
 
-def extract_phone(text: str) -> str:
-    m = re.search(r"0\d{1,4}-\d{1,4}-\d{3,4}", text)
+def extract_phone(text_: str) -> str:
+    m = re.search(r"0\d{1,4}-\d{1,4}-\d{3,4}", text_)
     return m.group(0) if m else ""
 
 
-# --- 住所分割（課題1と同じロジック） ---
+# ---------------------------------------------------------------------
+# 住所分割（正規表現使用・課題要件8）
+# ---------------------------------------------------------------------
 PREF_PATTERN = re.compile(r"^(北海道|東京都|(?:大阪|京都)府|.{2,3}?県)")
 NUM_CHARS = "0-90-9"
 CITY_PATTERN = re.compile(rf"^([^{NUM_CHARS}]+)")
@@ -166,11 +158,40 @@ def split_address(address: str):
     return pref, city, banchi, building
 
 
+def extract_address(soup: BeautifulSoup):
+    """
+    「住所」欄の adr マイクロフォーマットから region（番地まで）と
+    locality（建物名）を別々に取得し、region 側だけ正規表現で分割する。
+    """
+    address_value_tag = find_value_by_label(soup, ["住所"])
+    raw_address = ""
+    building_from_dom = ""
+    if address_value_tag:
+        adr_el = address_value_tag.find(class_=re.compile(r"\badr\b"))
+        if adr_el:
+            region_el = adr_el.find(class_=re.compile(r"\bregion\b"))
+            locality_el = adr_el.find(class_=re.compile(r"\blocality\b"))
+            if region_el:
+                raw_address = region_el.get_text(strip=True)
+                building_from_dom = locality_el.get_text(strip=True) if locality_el else ""
+            else:
+                raw_address = adr_el.get_text(" ", strip=True)
+        else:
+            raw_address = address_value_tag.get_text(" ", strip=True)
+
+    raw_address = re.sub(r"\s+", "", raw_address)
+    raw_address = re.sub(r"^〒?\d{3}-?\d{4}", "", raw_address)
+    raw_address = re.sub(r"(大きな地図で見る|地図印刷).*$", "", raw_address)
+    building_from_dom = re.sub(r"\s+", "", building_from_dom)
+
+    pref, city, banchi, building_guess = split_address(raw_address)
+    building = building_from_dom if building_from_dom else building_guess
+    return pref, city, banchi, building
+
+
 def resolve_final_url(session: requests.Session, raw_href: str) -> str:
     try:
-        res = session.get(
-            raw_href, headers=HEADERS, timeout=TIMEOUT_SEC, allow_redirects=True
-        )
+        res = session.get(raw_href, headers=HEADERS, timeout=TIMEOUT_SEC, allow_redirects=True)
         time.sleep(REQUEST_INTERVAL_SEC)
         return res.url
     except requests.RequestException:
@@ -194,6 +215,34 @@ def check_ssl(url: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def extract_official_url(soup: BeautifulSoup, base_url: str) -> str:
+    """
+    「オフィシャルページ」等のリンクを取得する。href が "#" のことがあるため、
+    data-o 属性のJSONに実URLが入っていればそちらを優先する。
+    """
+    for a in soup.find_all("a"):
+        link_text = a.get_text(strip=True)
+        if not ("オフィシャルページ" in link_text or "お店のホームページ" in link_text or "ホームページ" in link_text):
+            continue
+
+        data_o = a.get("data-o")
+        if data_o:
+            try:
+                info = json.loads(data_o)
+                domain_path = info.get("a", "")
+                scheme = info.get("b") or "http"
+                if domain_path:
+                    return f"{scheme}://{domain_path}"
+            except (ValueError, TypeError):
+                pass
+
+        href = a.get("href")
+        if href and href != "#":
+            return urljoin(base_url, href)
+
+    return ""
 
 
 def parse_detail_page(session: requests.Session, url: str):
@@ -226,49 +275,9 @@ def parse_detail_page(session: requests.Session, url: str):
         else extract_email(page_text)
     )
 
-    address_value_tag = find_value_by_label(soup, ["住所"])
-    raw_address = ""
-    building_from_dom = ""
-    if address_value_tag:
-        adr_el = address_value_tag.find(class_=re.compile(r"\badr\b"))
-        if adr_el:
-            region_el = adr_el.find(class_=re.compile(r"\bregion\b"))
-            locality_el = adr_el.find(class_=re.compile(r"\blocality\b"))
-            if region_el:
-                raw_address = region_el.get_text(strip=True)
-                building_from_dom = locality_el.get_text(strip=True) if locality_el else ""
-            else:
-                raw_address = adr_el.get_text(" ", strip=True)
-        else:
-            raw_address = address_value_tag.get_text(" ", strip=True)
-    raw_address = re.sub(r"\s+", "", raw_address)
-    raw_address = re.sub(r"^〒?\d{3}-?\d{4}", "", raw_address)
-    raw_address = re.sub(r"(大きな地図で見る|地図印刷).*$", "", raw_address)
-    building_from_dom = re.sub(r"\s+", "", building_from_dom)
-    pref, city, banchi, building_guess = split_address(raw_address)
-    building = building_from_dom if building_from_dom else building_guess
+    pref, city, banchi, building = extract_address(soup)
 
-    official_href = ""
-    for a in soup.find_all("a"):
-        link_text = a.get_text(strip=True)
-        if "オフィシャルページ" in link_text or "お店のホームページ" in link_text or "ホームページ" in link_text:
-            data_o = a.get("data-o")
-            if data_o:
-                try:
-                    info = json.loads(data_o)
-                    domain_path = info.get("a", "")
-                    scheme = info.get("b") or "http"
-                    if domain_path:
-                        official_href = f"{scheme}://{domain_path}"
-                except (ValueError, TypeError):
-                    official_href = ""
-            if not official_href:
-                href = a.get("href")
-                if href and href != "#":
-                    official_href = urljoin(url, href)
-            if official_href:
-                break
-
+    official_href = extract_official_url(soup, url)
     final_url = ""
     ssl_flag = False
     if official_href:
@@ -342,9 +351,7 @@ def main():
     df.to_sql(MYSQL_TABLE, con=engine, if_exists="replace", index=False)
     print(f"\nMySQL {MYSQL_DB}.{MYSQL_TABLE} へ {len(df)} 件を格納しました。")
 
-    # 確認用: 提出スクリーンショット取得の参考に、結果を標準出力にも出す
     with engine.connect() as conn:
-        from sqlalchemy import text
         count = conn.execute(text(f"SELECT COUNT(URL) FROM {MYSQL_TABLE};")).scalar()
         print(f"SELECT COUNT(URL) FROM {MYSQL_TABLE}; -> {count}")
 
