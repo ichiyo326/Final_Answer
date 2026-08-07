@@ -1,0 +1,12 @@
+version: "3.8"
+
+services:
+  ex2env:
+    build: .
+    container_name: ex2env
+    tty: true
+    stdin_open: true
+    ports:
+      - "3306:3306"
+    volumes:
+      - ..:/workspace   # リポジトリのルート（1-1.py等）をコンテナ内から参照できるようにする
