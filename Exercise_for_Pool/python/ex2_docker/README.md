@@ -39,3 +39,25 @@ DB名: `ex2` / テーブル名: `ex2_2`
 
 ※以前のREADMEでは `cd /workspace` からの実行手順になっていましたが、
 `2-2.py` は `/workspace/ex2_docker/2-2.py` にあるため、上記の通り修正しています。
+
+## DB確認方法（スクリーンショット再現用）
+
+コンテナ内で以下のように接続すると、日本語カラム名・日本語データが文字化けせず確認できる。
+
+```bash
+mysql --default-character-set=utf8mb4 -u scraper -pscraper_pw ex2
+```
+
+※ `mysql -u scraper -pscraper_pw ex2` のように `--default-character-set=utf8mb4` を
+付けずに接続すると、店舗名・住所などの日本語列が `?????` のように文字化けして表示される
+（データ自体は壊れていないが、クライアント側の表示文字コードがデフォルトのままだと
+正しく表示されないため）。上記オプション付きで接続すること。
+
+接続後、以下の3つで `ex2-2_count.png` / `ex2-2_columns.png` / `ex2-2_table.png` を再現できる。
+
+```sql
+select count(URL) from ex2_2;
+show columns from ex2_2;
+select * from ex2_2 limit 5\G
+```
+
