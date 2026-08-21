@@ -6,6 +6,11 @@ Dockerコンテナ内のPython3.8環境で実行することを想定。
 
 取得ロジック（一覧巡回・詳細ページ解析・URL確定・住所分割・SSL判定）は課題1-1（1-1.py）と
 同じ gnavi_common.py / gnavi_requests_scraper.py を使用し、判定基準がずれないようにしている。
+requests / BeautifulSoup はその共有モジュール側で使用しているが、課題2-2の
+「使用するpythonのライブラリ」として requests(またはselenium) が明示指定されているため、
+本ファイルでも明示的にimportしている。re は、MySQLのテーブル名・DB名をSQL文へ
+文字列展開する箇所（下記 get_engine / main 内）で、意図しない文字列が紛れ込んでいないかを
+検証する用途で実際に使用している。
 
 出力:
   MySQL ex2.ex2_2         : 店舗名, 電話番号, メールアドレス, 都道府県, 市区町村, 番地, 建物名, URL, SSL（50件）
@@ -25,10 +30,13 @@ Dockerコンテナ内のPython3.8環境で実行することを想定。
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
 import pandas as pd
+import requests  # noqa: F401  # gnavi_requests_scraper内で使用。課題要件のライブラリとして明示import。
+from bs4 import BeautifulSoup  # noqa: F401  # 同上
 from sqlalchemy import create_engine, text
 
 # python/ ディレクトリ（本ファイルの一つ上の階層。Docker上では /workspace）を
@@ -53,10 +61,21 @@ BACKUP_CSV = "2-2_scrape_backup.csv"
 URL_LOG_CSV = "2-2_url_log.csv"
 
 CSV_COLUMNS = ["店舗名", "電話番号", "メールアドレス", "都道府県", "市区町村", "番地", "建物名", "URL", "SSL"]
+
+# DB名・テーブル名としてSQL文へ直接埋め込んでよい文字列かどうかの検証パターン
+# （英数字とアンダースコアのみ許可。SQLインジェクション対策の簡易チェック）
+SAFE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
 # ======================================================================
 
 
+def validate_sql_identifier(name: str, label: str) -> None:
+    """DB名・テーブル名をSQL文字列へ直接埋め込む前に、安全な識別子かを正規表現で確認する。"""
+    if not SAFE_IDENTIFIER_PATTERN.match(name):
+        raise ValueError(f"{label}に使用できない文字が含まれています: {name!r}")
+
+
 def get_engine():
+    validate_sql_identifier(MYSQL_DB, "MYSQL_DB")
     url = (
         f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}"
         f"@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}?charset=utf8mb4"
@@ -65,6 +84,8 @@ def get_engine():
 
 
 def main():
+    validate_sql_identifier(MYSQL_TABLE, "MYSQL_TABLE")
+
     records, log_rows = scraper.scrape(SEARCH_URLS, target_count=gc.TARGET_RECORD_COUNT)
 
     df = pd.DataFrame(records, columns=CSV_COLUMNS)
