@@ -77,6 +77,66 @@ check(
 
 
 # ---------------------------------------------------------------------
+# 1b. resolve_shop_url(): CAPTCHA URLのdestinationパラメータとの照合
+#     （本間さんの指摘: 「CAPTCHA URLのdestinationパラメータなどから遷移対象を
+#      確認できる場合は、ぐるなび店舗ページから取得した外部サイトURLと
+#      一致することを確認したうえで、その外部サイトURLを使用してください」）
+# ---------------------------------------------------------------------
+class FakeSessionCaptchaWithDestination:
+    def get(self, url, headers=None, timeout=None, allow_redirects=None):
+        import urllib.parse as up
+        encoded = up.quote(url, safe="")
+        return FakeResponse(f"https://captcha.gnavi.co.jp/verify?destination={encoded}")
+
+
+result = gc.resolve_shop_url(FakeSessionCaptchaWithDestination(), "https://shop-example.gorp.jp/")
+check(
+    "CAPTCHA検出時: destinationパラメータが正しく抽出される",
+    result["destination_param"] == "https://shop-example.gorp.jp/",
+    f"destination_param={result['destination_param']}",
+)
+check(
+    "CAPTCHA検出時: destinationが元の外部サイトURLと一致すればdestination_match=True",
+    result["destination_match"] is True,
+    f"destination_match={result['destination_match']}",
+)
+check(
+    "CAPTCHA検出時: 一致確認後も採用URLは元の外部サイトURLのまま",
+    result["adopted_url"] == "https://shop-example.gorp.jp/",
+)
+
+
+class FakeSessionCaptchaWithMismatchedDestination:
+    def get(self, url, headers=None, timeout=None, allow_redirects=None):
+        return FakeResponse("https://captcha.gnavi.co.jp/verify?destination=https://totally-different-site.com/")
+
+
+result = gc.resolve_shop_url(FakeSessionCaptchaWithMismatchedDestination(), "https://shop-example.gorp.jp/")
+check(
+    "CAPTCHA検出時: destinationが一致しなければdestination_match=False",
+    result["destination_match"] is False,
+    f"destination_match={result['destination_match']}",
+)
+check(
+    "CAPTCHA検出時: 不一致でも採用URLは元の外部サイトURLのまま変わらない（安全側）",
+    result["adopted_url"] == "https://shop-example.gorp.jp/",
+)
+
+
+class FakeSessionCaptchaNoDestination:
+    def get(self, url, headers=None, timeout=None, allow_redirects=None):
+        return FakeResponse("https://captcha.gnavi.co.jp/verify")
+
+
+result = gc.resolve_shop_url(FakeSessionCaptchaNoDestination(), "https://shop-example.gorp.jp/")
+check(
+    "CAPTCHA検出時: destinationパラメータが無ければdestination_match=None",
+    result["destination_match"] is None,
+    f"destination_match={result['destination_match']}",
+)
+
+
+# ---------------------------------------------------------------------
 # 2. resolve_shop_url(): ぐるなびのクリック計測・中継URLへ転送された場合も同様に除外
 # ---------------------------------------------------------------------
 class FakeSessionRelay:

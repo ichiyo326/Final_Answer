@@ -203,6 +203,8 @@ def parse_detail_page(session: requests.Session, url: str, log_rows: list[dict])
         "accessed_url": resolve_info["accessed_url"],
         "adopted_url": resolve_info["adopted_url"],
         "adopted_reason": resolve_info["adopted_reason"],
+        "destination_param": resolve_info["destination_param"],
+        "destination_match": resolve_info["destination_match"],
         "fail_reason": resolve_info["fail_reason"],
         "ssl": ssl_flag,
         "ssl_reason": ssl_reason,

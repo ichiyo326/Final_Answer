@@ -25,7 +25,7 @@ import re
 import socket
 import ssl
 import time
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -163,6 +163,53 @@ def is_gnavi_or_relay_host(url: str) -> bool:
     return host.endswith("gnavi.co.jp")
 
 
+# CAPTCHA・中継ページのURLに遷移先（元の外部サイトURL）が埋め込まれる際に
+# よく使われるクエリパラメータ名の候補。サイトによって呼び方が異なるため複数試す。
+DESTINATION_PARAM_CANDIDATES = [
+    "destination", "dest", "to", "url", "redirect",
+    "redirect_url", "target", "returl", "return_url",
+]
+
+
+def extract_destination_param(url: str) -> str:
+    """
+    CAPTCHA・中継URLのクエリパラメータに遷移先（destination等）が含まれていれば、
+    URLデコード済みの値を返す。見つからなければ空文字。
+
+    本間さんの指摘（「CAPTCHA URLのdestinationパラメータなどから遷移対象を確認できる
+    場合は、ぐるなび店舗ページから取得した外部サイトURLと一致することを確認したうえで、
+    その外部サイトURLを使用してください」）に対応するための照合用データ取得。
+    """
+    if not url:
+        return ""
+    try:
+        query = urlparse(url).query
+        params = parse_qs(query)
+    except ValueError:
+        return ""
+    for key in DESTINATION_PARAM_CANDIDATES:
+        if key in params and params[key]:
+            return params[key][0]
+    return ""
+
+
+def destination_matches_gnavi_url(destination: str, gnavi_url: str):
+    """
+    destinationパラメータの値と、ぐるなび店舗ページから取得していた外部サイトURLが
+    同一サイトを指しているとみなせるかを判定する。
+
+    - destinationが取得できなかった場合: None（「確認できる場合は」の対象外であることを示す）
+    - ホスト名が一致（またはサブドメイン関係）していればTrue、そうでなければFalse
+    """
+    if not destination or not gnavi_url:
+        return None
+    dest_host = (urlparse(destination).hostname or "").lower()
+    gnavi_host = (urlparse(gnavi_url).hostname or "").lower()
+    if not dest_host or not gnavi_host:
+        return None
+    return dest_host == gnavi_host or dest_host.endswith("." + gnavi_host) or gnavi_host.endswith("." + dest_host)
+
+
 def resolve_shop_url(session: requests.Session, external_url: str, referer: str = "") -> dict:
     """
     ぐるなび店舗ページから取得した外部サイトURL(external_url)へ実際にアクセスし、
@@ -189,6 +236,8 @@ def resolve_shop_url(session: requests.Session, external_url: str, referer: str 
         "adopted_url": "",
         "adopted_reason": "no_url",
         "fail_reason": "",
+        "destination_param": "",
+        "destination_match": None,
     }
     if not external_url:
         return result
@@ -205,6 +254,14 @@ def resolve_shop_url(session: requests.Session, external_url: str, referer: str 
         if is_gnavi_or_relay_host(final_url):
             # CAPTCHAやぐるなびの中継URLへ転送された場合はそのURLを店舗ホームページとして
             # 保存しない。突破・回避を狙った再アクセスは行わず、フォールバックする。
+            #
+            # 本間さんの指摘対応: CAPTCHA/中継URLのdestination等のパラメータから
+            # 遷移対象を確認できる場合は、ぐるなび店舗ページから取得していた外部サイトURLと
+            # 一致することを確認する（一致しなくても採用URLはexternal_urlのまま変えない。
+            # あくまで照合結果をログへ残すための処理）。
+            destination = extract_destination_param(final_url)
+            result["destination_param"] = destination
+            result["destination_match"] = destination_matches_gnavi_url(destination, external_url)
             result["adopted_url"] = external_url
             result["adopted_reason"] = "fallback_captcha"
         else:
